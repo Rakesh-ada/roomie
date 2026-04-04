@@ -1,0 +1,32 @@
+name: Deploy Staging
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - develop
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build placeholder
+        run: echo "Add staging build/deploy commands here"
+
+      - name: Deploy placeholder
+        env:
+          STAGING_API_URL: ${{ secrets.STAGING_API_URL }}
+        run: echo "Deploy to staging using your provider CLI"
