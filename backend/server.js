@@ -1,37 +1,13 @@
-const app = require("./app");
-const connectDB = require("./src/config/db");
-const env = require("./src/config/env");
-const logger = require("./src/utils/logger");
+require("dotenv").config()
 
-let server;
+const app = require("./src/app")
+const connectToDb = require("./src/config/database")
+const dns = require("dns")
 
-const startServer = async () => {
-  try {
-    await connectDB();
+dns.setServers(["8.8.8.8", "1.1.1.1"])
 
-    server = app.listen(env.port, () => {
-      logger.info(`Server listening on port ${env.port}`);
-    });
-  } catch (error) {
-    logger.error("Failed to start server", error);
-    process.exit(1);
-  }
-};
+connectToDb()
 
-const shutdown = (signal) => {
-  logger.info(`${signal} received, shutting down`);
-
-  if (!server) {
-    process.exit(0);
-  }
-
-  server.close(() => {
-    logger.info("HTTP server closed");
-    process.exit(0);
-  });
-};
-
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-
-startServer();
+app.listen(3000,()=>{
+    console.log("Server Running on Port 3000")
+})
