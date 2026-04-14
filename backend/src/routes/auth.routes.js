@@ -1,14 +1,27 @@
 const express = require('express')
 const userModel = require("../models/user.models")
+const pendingUserModel = require("../models/pendingUser.models")
 const jwt = require("jsonwebtoken")
 const authRouter = express.Router()
 const bcrypt = require("bcryptjs")
+const { sendOtpEmail } = require("../utils/email")
 
 const JWT_SECRET = process.env.JWT_SECRET
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN 
+const OTP_EXPIRY_MINUTES = 10
+const OTP_TOKEN_SECRET = process.env.OTP_TOKEN_SECRET || JWT_SECRET
+const OTP_TOKEN_EXPIRES_IN = process.env.OTP_TOKEN_EXPIRES_IN || "10m"
 
 function createToken(userId) {
     return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN })
+}
+
+function createOtpToken(email) {
+    return jwt.sign(
+        { email, purpose: "register-otp" },
+        OTP_TOKEN_SECRET,
+        { expiresIn: OTP_TOKEN_EXPIRES_IN }
+    )
 }
 
 function safeUser(user) {
@@ -29,6 +42,10 @@ function getTokenFromHeader(req) {
     return authHeader.split(" ")[1]
 }
 
+function generateOtp() {
+    return String(Math.floor(100000 + Math.random() * 900000))
+}
+
 /**
  * /api/auth/register
  */
@@ -42,24 +59,44 @@ authRouter.post("/register", async (req, res) => {
             })
         }
 
-        const hash = await bcrypt.hash(password, 10)
+        const normalizedEmail = email.toLowerCase().trim()
 
-        const user = await userModel.create({
+        const existingUser = await userModel.findOne({ email: normalizedEmail })
+        if (existingUser) {
+            return res.status(409).json({ message: "User already exists with this email address" })
+        }
+
+        const hash = await bcrypt.hash(password, 10)
+        const otp = generateOtp()
+        const otpExpiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000)
+
+        await pendingUserModel.findOneAndUpdate(
+            { email: normalizedEmail },
+            {
             name,
-            email,
+            email: normalizedEmail,
             password: hash,
             gender,
             phoneNumber,
             city,
-            age
-        })
+            age,
+            otp,
+            otpExpiresAt
+            },
+            {
+                upsert: true,
+                new: true,
+                setDefaultsOnInsert: true
+            }
+        )
 
-        const token = createToken(user._id)
+        await sendOtpEmail(normalizedEmail, otp)
 
-        return res.status(201).json({
-            message: "user registered",
-            token,
-            user: safeUser(user)
+        const otpToken = createOtpToken(normalizedEmail)
+
+        return res.status(200).json({
+            message: "OTP sent to your email. Verify OTP to complete registration.",
+            otpToken
         })
     } catch (error) {
         if (error.code === 11000) {
@@ -70,6 +107,72 @@ authRouter.post("/register", async (req, res) => {
 }
 
 )
+
+/**
+ * POST /api/auth/verify-otp
+ */
+authRouter.post("/verify-otp", async (req, res) => {
+    try {
+        const { email, otp, otpToken } = req.body
+
+        if (!email || !otp || !otpToken) {
+            return res.status(400).json({ message: "email, otp and otpToken are required" })
+        }
+
+        const normalizedEmail = email.toLowerCase().trim()
+        let decodedOtpToken = null
+
+        try {
+            decodedOtpToken = jwt.verify(otpToken, OTP_TOKEN_SECRET)
+        } catch (error) {
+            return res.status(401).json({ message: "Invalid or expired otpToken" })
+        }
+
+        if (decodedOtpToken.email !== normalizedEmail || decodedOtpToken.purpose !== "register-otp") {
+            return res.status(401).json({ message: "Invalid otpToken for this email" })
+        }
+
+        const pendingUser = await pendingUserModel.findOne({ email: normalizedEmail })
+
+        if (!pendingUser) {
+            return res.status(404).json({ message: "No pending registration found or OTP expired" })
+        }
+
+        if (pendingUser.otpExpiresAt.getTime() < Date.now()) {
+            await pendingUserModel.deleteOne({ _id: pendingUser._id })
+            return res.status(410).json({ message: "OTP expired. Please register again" })
+        }
+
+        if (pendingUser.otp !== String(otp).trim()) {
+            return res.status(401).json({ message: "Invalid OTP" })
+        }
+
+        const existingUser = await userModel.findOne({ email: normalizedEmail })
+
+        if (existingUser) {
+            await pendingUserModel.deleteOne({ _id: pendingUser._id })
+            return res.status(409).json({ message: "User already exists with this email address" })
+        }
+
+        await userModel.create({
+            name: pendingUser.name,
+            email: pendingUser.email,
+            password: pendingUser.password,
+            gender: pendingUser.gender,
+            phoneNumber: pendingUser.phoneNumber,
+            city: pendingUser.city,
+            age: pendingUser.age
+        })
+
+        await pendingUserModel.deleteOne({ _id: pendingUser._id })
+
+        return res.status(201).json({
+            message: "OTP verified. Registration complete. You can now sign in."
+        })
+    } catch (error) {
+        return res.status(500).json({ message: "Something went wrong" })
+    }
+})
 
 
 /**
@@ -83,9 +186,18 @@ authRouter.post("/login", async (req, res) => {
             return res.status(400).json({ message: "email and password are required" })
         }
 
-        const user = await userModel.findOne({ email })
+        const normalizedEmail = email.toLowerCase().trim()
+        const user = await userModel.findOne({ email: normalizedEmail })
 
         if (!user) {
+            const pendingUser = await pendingUserModel.findOne({ email: normalizedEmail })
+
+            if (pendingUser) {
+                return res.status(403).json({
+                    message: "Please verify OTP before signing in"
+                })
+            }
+
             return res.status(404).json({
                 message: "User not found with this email address"
             })
